@@ -44,3 +44,11 @@ body {
     75%,95%  { transform: translateX(-300%); }
     100%     { transform: translateX(0%); }
 }
+
+.navbar-brand {
+  font-family: 'Montserrat', sans-serif;
+  font-weight: 600;      /* bold like in the image */
+  letter-spacing: 3px;   /* to spread the letters out */
+  color: #365f25;        /* dark blue text */
+  text-transform: uppercase; /* all caps */
+}
