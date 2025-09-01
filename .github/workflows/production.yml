@@ -6,12 +6,16 @@ on:
   workflow_dispatch:
 
 permissions:
-  id-token: write   # required for Workload Identity Federation
+  id-token: write
   contents: read
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # Make the bucket available to ALL steps
+    env:
+      BUCKET: ${{ secrets.GCS_BUCKET_NAME }}
+      GCS_PREFIX: ""
 
     steps:
       - name: Checkout repository
@@ -28,26 +32,49 @@ jobs:
         with:
           project_id: ${{ secrets.GOOGLE_PROJECT_ID }}
 
-      - name: Upload static files to GCS (exclude GitHub files)
-        env:
-          BUCKET: ${{ secrets.GCS_BUCKET_NAME }}
+      # ---- Preflight checks ----
+      - name: Preflight: validate bucket
         run: |
           set -euo pipefail
-          DEST="gs://${BUCKET}"
-          echo "Deploying files to $DEST"
-          # Exclude .github folder and hidden files (like .git)
-          gsutil -m rsync -r -d -x "^\..*|^.github/.*" ./ "$DEST"
+          if [ -z "${BUCKET:-}" ]; then
+            echo "::error::Missing GCS_BUCKET secret. Set it to your bucket name (without gs://)."
+            exit 1
+          fi
+          echo "Target bucket: ${BUCKET}"
+          DEST="gs://${BUCKET}/${GCS_PREFIX}"
+          echo "DEST: ${DEST}"
 
-      # Optional: Set caching rules for better performance
-      - name: Set cache headers
-        env:
-          BUCKET: ${{ secrets.GCS_BUCKET }}
+      # ---- Upload (exclude .github and dotfiles) ----
+      - name: Upload static files to GCS
         run: |
-          DEST="gs://${BUCKET}"
-          echo "Setting cache headers..."
-          # Cache static assets aggressively
-          gsutil -m setmeta -h "Cache-Control:public,max-age=31536000,immutable" \
-            $(gsutil ls "${DEST}/**" | grep -E '\.(css|js|png|jpg|jpeg|gif|svg|ico)$') || true
-          # No-cache for HTML so updates are always fresh
-          gsutil -m setmeta -h "Cache-Control:no-cache" \
-            $(gsutil ls "${DEST}/**" | grep -E '\.html$') || true
+          set -euo pipefail
+          DEST="gs://${BUCKET}/${GCS_PREFIX}"
+          echo "Deploying files to ${DEST}"
+          gsutil -m rsync -r -d -x "^\..*|^.github/.*" ./ "${DEST}"
+
+      # ---- Safe cache headers (won’t error if no matches) ----
+      - name: Set cache headers (safe)
+        run: |
+          set -euo pipefail
+          DEST="gs://${BUCKET}/${GCS_PREFIX}"
+          echo "Setting cache headers under ${DEST}"
+
+          # Long-cache static assets
+          assets=$(gsutil ls -r "${DEST}/**" | grep -E '\.(css|js|mjs|png|jpg|jpeg|gif|svg|ico|webp|woff2?)$' || true)
+          if [ -n "${assets}" ]; then
+            echo "Found static assets:"
+            echo "${assets}" | sed 's/^/  /'
+            echo "${assets}" | xargs -r -n50 gsutil -m setmeta -h "Cache-Control:public,max-age=31536000,immutable"
+          else
+            echo "No static assets found to set long cache."
+          fi
+
+          # No-cache for HTML
+          htmls=$(gsutil ls -r "${DEST}/**" | grep -E '\.html$' || true)
+          if [ -n "${htmls}" ]; then
+            echo "Found HTML files:"
+            echo "${htmls}" | sed 's/^/  /'
+            echo "${htmls}" | xargs -r -n50 gsutil -m setmeta -h "Cache-Control:no-cache"
+          else
+            echo "No HTML files found to set no-cache."
+          fi
