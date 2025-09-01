@@ -1,0 +1,85 @@
+name: Deploy Production
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # required for Workload Identity Federation
+  contents: read
+
+env:
+  # Adjust if your build outputs to something else (e.g., "build" or "out")
+  BUILD_DIR: dist
+  # Optional path prefix inside your bucket, leave blank to deploy at bucket root
+  GCS_DEPLOY_PREFIX: ""   # e.g., "prod/" -> will deploy to gs://BUCKET_NAME/prod/
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        # If your build command differs, change it here (e.g., "pnpm build", "yarn build")
+        run: npm run build
+
+      # ---- Google Cloud auth (Workload Identity Federation) ----
+      - name: Authenticate to Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+      - name: Setup gcloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GOOGLE_PROJECT_ID }}
+
+      - name: Verify auth (optional)
+        run: gcloud sts token --help > /dev/null
+
+      # ---- Deploy to GCS ----
+      - name: Ensure target prefix exists (no-op if root)
+        if: env.GCS_DEPLOY_PREFIX != ''
+        run: |
+          echo "Deploy prefix: ${GCS_DEPLOY_PREFIX}"
+
+      - name: Upload build to GCS (sync)
+        env:
+          BUCKET: ${{ secrets.GCS_BUCKET }}    # bucket name without gs://
+        run: |
+          set -euo pipefail
+          DEST_URI="gs://${BUCKET}/${GCS_DEPLOY_PREFIX}"
+          echo "Syncing ${BUILD_DIR}/ -> ${DEST_URI}"
+          # -m for parallel, -d to delete objects in destination that don't exist locally
+          gsutil -m rsync -r -d "${BUILD_DIR}/" "${DEST_URI}"
+
+      # ---- (Optional) Set cache headers for static assets ----
+      # Adjust patterns as needed for your framework’s hashed assets.
+      - name: Set caching for hashed assets (optional but recommended)
+        if: always()
+        env:
+          BUCKET: ${{ secrets.GCS_BUCKET }}
+        run: |
+          if [ -d "${BUILD_DIR}" ]; then
+            DEST_URI="gs://${BUCKET}/${GCS_DEPLOY_PREFIX}"
+            # Long cache for fingerprinted files
+            gsutil -m setmeta -h "Cache-Control:public, max-age=31536000, immutable" \
+              $(gsutil ls "${DEST_URI}**" | grep -E '\.[a-f0-9]{8,}\.')
+            # Safer cache for HTML entry points
+            gsutil -m setmeta -h "Cache-Control:no-cache" \
+              $(gsutil ls "${DEST_URI}**" | grep -E '\.html$') || true
+          fi
