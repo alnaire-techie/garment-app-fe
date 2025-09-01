@@ -30,7 +30,7 @@ jobs:
 
       - name: Upload static files to GCS (exclude GitHub files)
         env:
-          BUCKET: ${{ secrets.GCS_BUCKET }}
+          BUCKET: ${{ secrets.GCS_BUCKET_NAME }}
         run: |
           set -euo pipefail
           DEST="gs://${BUCKET}"
